@@ -122,7 +122,7 @@ async def main():
     session_string = os.environ["TELEGRAM_SESSION"]
 
     app = Client("searcher", api_id=api_id, api_hash=api_hash,
-                 session_string=session_string)
+                 session_string=session_string, no_updates=True)
 
     results_file = TMP_DIR / "search_results.txt"
     total_matches = 0
@@ -130,7 +130,10 @@ async def main():
 
     peer = InputPeerChat(chat_id=abs(DATA_GROUP_ID))
 
+    print("Connecting to Telegram...")
     async with app:
+        me = await app.get_me()
+        print(f"Logged in as: {me.first_name} (id: {me.id})")
         # Test access
         print(f"Testing access to data group {DATA_GROUP_ID}...")
         try:

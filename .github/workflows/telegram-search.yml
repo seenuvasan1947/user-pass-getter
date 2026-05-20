@@ -17,7 +17,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install pyrogram tgcrypto
+          pip install pyrogram==2.0.106 tgcrypto
 
       - name: Install search tools
         run: |
