@@ -6,7 +6,7 @@ from pathlib import Path
 
 from pyrogram import Client
 
-DATA_GROUP_ID = -5259911981
+DATA_GROUP_ID = -1005259911981
 RESULTS_GROUP_ID = -1003951031545
 MAX_FILES_PER_TYPE = 2
 TMP_DIR = Path(tempfile.gettempdir())
