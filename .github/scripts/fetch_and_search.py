@@ -98,6 +98,26 @@ async def main():
     type_counts = {"zip": 0, "7z": 0, "rar": 0, "text": 0}
 
     async with app:
+        # Populate peer cache by fetching dialogs first
+        print("Loading dialogs to resolve peer IDs...")
+        data_chat = None
+        results_chat = None
+        async for dialog in app.get_dialogs():
+            print(f"  [{dialog.chat.id}] {dialog.chat.title or dialog.chat.first_name} ({dialog.chat.type})")
+            if dialog.chat.id == DATA_GROUP_ID:
+                data_chat = dialog.chat
+            if dialog.chat.id == RESULTS_GROUP_ID:
+                results_chat = dialog.chat
+
+        if not data_chat:
+            print(f"\nERROR: Data group {DATA_GROUP_ID} not found in dialogs!")
+            print("Make sure the account is a member of the group.")
+            return
+
+        print(f"\nData group found: {data_chat.title}")
+        if results_chat:
+            print(f"Results group found: {results_chat.title}")
+
         with open(results_file, "w") as rf:
             rf.write(f"Search target: {search_string}\n")
             rf.write("=" * 60 + "\n\n")
