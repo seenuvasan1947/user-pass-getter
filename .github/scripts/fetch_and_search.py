@@ -5,8 +5,10 @@ import tempfile
 from pathlib import Path
 
 from pyrogram import Client
+from pyrogram.raw.functions.messages import GetHistory
+from pyrogram.raw.types import InputPeerChat
 
-DATA_GROUP_ID = -1005259911981
+DATA_GROUP_ID = -5259911981
 RESULTS_GROUP_ID = -1003951031545
 MAX_FILES_PER_TYPE = 2
 TMP_DIR = Path(tempfile.gettempdir())
@@ -21,7 +23,6 @@ def get_search_target():
 
 def check_disk_space(required_bytes, path="/tmp"):
     free = shutil.disk_usage(path).free
-    # Keep 500MB buffer
     return free - required_bytes > 500 * 1024 * 1024
 
 
@@ -82,6 +83,22 @@ def search_file(file_path, search_string, file_type):
     return matches
 
 
+def extract_doc_attrs(raw_msg):
+    """Extract file_name and file_size from a raw Message with document media."""
+    if not hasattr(raw_msg, 'media') or raw_msg.media is None:
+        return None, None
+    doc = getattr(raw_msg.media, 'document', None)
+    if doc is None:
+        return None, None
+    file_name = None
+    for attr in doc.attributes:
+        name = getattr(attr, 'file_name', None)
+        if name:
+            file_name = name
+            break
+    return file_name, doc.size
+
+
 async def main():
     search_string = get_search_target()
     print(f"Searching for: {search_string}")
@@ -97,79 +114,97 @@ async def main():
     total_matches = 0
     type_counts = {"zip": 0, "7z": 0, "rar": 0, "text": 0}
 
+    peer = InputPeerChat(chat_id=abs(DATA_GROUP_ID))
+
     async with app:
-        # Populate peer cache by fetching dialogs first
-        print("Loading dialogs to resolve peer IDs...")
-        data_chat = None
-        results_chat = None
-        async for dialog in app.get_dialogs():
-            print(f"  [{dialog.chat.id}] {dialog.chat.title or dialog.chat.first_name} ({dialog.chat.type})")
-            if dialog.chat.id == DATA_GROUP_ID:
-                data_chat = dialog.chat
-            if dialog.chat.id == RESULTS_GROUP_ID:
-                results_chat = dialog.chat
-
-        if not data_chat:
-            print(f"\nERROR: Data group {DATA_GROUP_ID} not found in dialogs!")
-            print("Make sure the account is a member of the group.")
+        # Test access to the data group
+        print(f"Testing access to data group {DATA_GROUP_ID}...")
+        try:
+            test = await app.invoke(
+                GetHistory(peer=peer, offset_id=0, offset_date=0, add_offset=0,
+                           limit=1, max_id=0, min_id=0, hash=0)
+            )
+            msg_count = getattr(test, 'count', len(test.messages))
+            print(f"Access OK. Messages in group: {msg_count}")
+        except Exception as e:
+            print(f"ERROR: Cannot access data group: {e}")
             return
-
-        print(f"\nData group found: {data_chat.title}")
-        if results_chat:
-            print(f"Results group found: {results_chat.title}")
 
         with open(results_file, "w") as rf:
             rf.write(f"Search target: {search_string}\n")
             rf.write("=" * 60 + "\n\n")
 
-            async for message in app.get_chat_history(DATA_GROUP_ID):
-                if not message.document:
-                    continue
-
-                file_name = message.document.file_name or "unknown"
-                file_size = message.document.file_size or 0
-                file_type = classify_file(file_name)
-
-                if file_type is None:
-                    continue
-
-                if type_counts[file_type] >= MAX_FILES_PER_TYPE:
-                    continue
-
-                # Check if we've processed enough files
-                if all(c >= MAX_FILES_PER_TYPE for c in type_counts.values()):
+            offset_id = 0
+            done = False
+            while not done:
+                raw_history = await app.invoke(
+                    GetHistory(
+                        peer=peer,
+                        offset_id=offset_id, offset_date=0, add_offset=0,
+                        limit=50, max_id=0, min_id=0, hash=0
+                    )
+                )
+                raw_messages = raw_history.messages
+                if not raw_messages:
                     break
 
-                print(f"Processing: {file_name} ({file_size / 1024 / 1024:.1f} MB) [{file_type}]")
+                for raw_msg in raw_messages:
+                    offset_id = raw_msg.id
 
-                if not check_disk_space(file_size):
-                    print(f"  Skipping {file_name}: not enough disk space")
-                    rf.write(f"[SKIPPED] {file_name}: insufficient disk space\n")
-                    continue
+                    file_name, file_size = extract_doc_attrs(raw_msg)
+                    if not file_name:
+                        continue
 
-                download_path = TMP_DIR / file_name
-                try:
-                    await message.download(file_name=str(download_path))
-                    type_counts[file_type] += 1
+                    file_type = classify_file(file_name)
+                    if file_type is None:
+                        continue
 
-                    matches = search_file(download_path, search_string, file_type)
+                    if type_counts[file_type] >= MAX_FILES_PER_TYPE:
+                        if all(c >= MAX_FILES_PER_TYPE for c in type_counts.values()):
+                            done = True
+                            break
+                        continue
 
-                    if matches:
-                        rf.write(f"File: {file_name}\n")
-                        rf.write(f"Type: {file_type} | Size: {file_size / 1024 / 1024:.1f} MB\n")
-                        rf.write(f"Matches: {len(matches)}\n")
-                        for line in matches[:100]:  # cap per file
-                            rf.write(f"  {line}\n")
-                        rf.write("\n")
-                        total_matches += len(matches)
-                        print(f"  Found {len(matches)} matches")
-                    else:
-                        print(f"  No matches")
+                    file_size = file_size or 0
+                    print(f"Processing: {file_name} ({file_size / 1024 / 1024:.1f} MB) [{file_type}]")
 
-                finally:
-                    if download_path.exists():
-                        download_path.unlink()
-                        print(f"  Cleaned up {file_name}")
+                    if not check_disk_space(file_size):
+                        print(f"  Skipping {file_name}: not enough disk space")
+                        rf.write(f"[SKIPPED] {file_name}: insufficient disk space\n")
+                        continue
+
+                    # Download using high-level API with message ID
+                    download_path = TMP_DIR / file_name
+                    try:
+                        dl_path = await app.download_media(
+                            raw_msg, file_name=str(download_path)
+                        )
+                        if not dl_path:
+                            print(f"  Download failed for {file_name}")
+                            continue
+                        download_path = Path(dl_path)
+                        type_counts[file_type] += 1
+
+                        matches = search_file(download_path, search_string, file_type)
+
+                        if matches:
+                            rf.write(f"File: {file_name}\n")
+                            rf.write(f"Type: {file_type} | Size: {file_size / 1024 / 1024:.1f} MB\n")
+                            rf.write(f"Matches: {len(matches)}\n")
+                            for line in matches[:100]:
+                                rf.write(f"  {line}\n")
+                            rf.write("\n")
+                            total_matches += len(matches)
+                            print(f"  Found {len(matches)} matches")
+                        else:
+                            print(f"  No matches")
+
+                    except Exception as e:
+                        print(f"  Error processing {file_name}: {e}")
+                    finally:
+                        if download_path.exists():
+                            download_path.unlink()
+                            print(f"  Cleaned up {file_name}")
 
             rf.write(f"\n{'=' * 60}\n")
             rf.write(f"Total matches: {total_matches}\n")
@@ -177,17 +212,22 @@ async def main():
 
         # Send results
         print(f"\nSending results to Telegram ({total_matches} total matches)...")
-        if results_file.stat().st_size > 0:
-            await app.send_document(
-                RESULTS_GROUP_ID,
-                document=str(results_file),
-                caption=f"Search results for: {search_string}\nTotal matches: {total_matches}"
-            )
-        else:
-            await app.send_message(
-                RESULTS_GROUP_ID,
-                f"No matches found for: {search_string}"
-            )
+        try:
+            if results_file.stat().st_size > 0:
+                await app.send_document(
+                    RESULTS_GROUP_ID,
+                    document=str(results_file),
+                    caption=f"Search results for: {search_string}\nTotal matches: {total_matches}"
+                )
+            else:
+                await app.send_message(
+                    RESULTS_GROUP_ID,
+                    f"No matches found for: {search_string}"
+                )
+        except Exception as e:
+            print(f"Failed to send results: {e}")
+            print("Results saved locally:")
+            print(results_file.read_text())
 
     print("Done!")
 
